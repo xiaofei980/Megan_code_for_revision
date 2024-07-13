@@ -1,0 +1,525 @@
+---
+title: "Preprocessing for Figures"
+author: "Xiaofei Yu"
+date: "16-05-2024"
+output: 
+  html_document:
+    theme:
+      spacelab
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    number_sections: false
+    highlight: textmate 
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(gplots)
+library(Rtsne)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(stringr)
+library(gridExtra)
+
+library(ggridges)
+library(ggpubr)
+library(scales)
+library(clustree)
+library(cowplot)
+library(umap)
+library(lme4)
+library(Rphenograph)
+```
+
+# IMC Data Analysis
+
+```{r global-variables, include=TRUE, results=FALSE}
+# Path for loading data and saving results 
+# Project folder path:
+base = "/mnt/Data1/groupfebe/runs/Xiaofei/Megan_IMC/"
+
+# Name of input and output directories:
+input_path = file.path(base, "Projectfile/Data/Figures_input/")
+output_path = file.path(base, "Projectfile/Results/Figures_output/")
+
+
+# Load celldata excluding tSNE coordinates
+celldata = read.csv(paste0(input_path, "/240523_normalised_concatenated_scaled_data_001threshold.csv"))
+
+# Add clustering and t-SNE columns to datafiles
+tSNECSV = read.csv(paste0(input_path, "/240523_tSNE.csv"))
+clustCSV = read.csv(paste0(input_path,"/240523_clustering_k50_k40_k30_k25_k20_16markers.csv"))
+celldata = cbind(celldata,tSNECSV, clustCSV)
+imagemetadata = read.csv(file.path(input_path, "/imagemetadata.csv"))
+
+#change celldata experimental group name for making plot 
+celldata$ExpGroup[celldata$ExpGroup=="CONTROL"]<-"MRTX+PD1"
+celldata$ExpGroup[celldata$ExpGroup=="TREATMENT"]<-"MRTX+PD1+CTLA-4"
+
+# Replace all instances of CONTROL with MRTX+PD1 in the ROI_ID column
+celldata$ROI_ID <- gsub("CONTROL", "MRTX+PD1", celldata$ROI_ID)
+celldata$ROI_ID <- gsub("TREATMENT", "MRTX+PD1+CTLA-4", celldata$ROI_ID)
+celldata$filename <- gsub("CONTROL", "MRTX+PD1", celldata$filename)
+celldata$filename <- gsub("TREATMENT", "MRTX+PD1+CTLA-4", celldata$filename)
+
+# Umap_myeloidCD = read.csv(paste0(input_path, "/Umap_myeloidCD.csv"))
+```
+
+
+# Define all plot function  
+```{r}
+# Heatmap
+get.cluster.centers = function(celldata, tSNEaxes, clustering){
+  celldata = celldata[!is.na(celldata[,clustering]),]
+  clusterCenters = data.frame()
+  for (cl in unique(celldata[,clustering])){
+    x = median(celldata[,tSNEaxes[1]][which(celldata[,clustering] == cl)])
+    y = median(celldata[,tSNEaxes[2]][which(celldata[,clustering] == cl)])
+    clusterCenters[cl, "cl"] = cl
+    clusterCenters[cl, "x"] = x
+    clusterCenters[cl, "y"] = y
+  }
+  return(clusterCenters)
+}
+
+make.heatmap.matrix = function(celldata, markerlist, cluster){
+  heatmap_df = data.frame()
+  
+  # Leave out unclustered cells (cluster == NA)
+  celldata = celldata[!is.na(celldata[,cluster]),]
+  
+  for (cl in unique(celldata[,cluster])){
+    md = celldata[celldata[,cluster] == cl,]
+    for (marker in markerlist){
+      heatmap_df[cl, marker] =  mean(md[,paste("MI_", marker, sep = "")])
+      heatmap_df[cl, "clustername"] = cl
+    }
+  }
+  
+  row.names(heatmap_df) = heatmap_df$clustername
+  heatmap_df = t(as.matrix(subset(heatmap_df, select = -clustername)))
+  
+  return(heatmap_df)
+}
+
+plot.heatmap2 = function(celldata, markerlist, cluster, scale="column", title,
+                         margins=c(4,5), srtCol=0, Rowv=NULL, Colv=NULL,
+                         barplot = c(), type = "stack", transpose = F
+){
+  matrix = make.heatmap.matrix(celldata, markerlist, cluster)
+  
+  if (transpose) {matrix = t(matrix)}
+  
+  hm = heatmap.2(matrix,
+                 dendrogram = "none", Rowv = Rowv, Colv = Colv, 
+                 scale = scale, trace = "none", 
+                 col = colorRampPalette(brewer.pal(8, "Blues"))(25),
+                # col = colorRampPalette(c("blue","white","red"))(25),
+                 
+                 main = title, margins = margins,
+                 cexRow = 1, cexCol = 1, srtCol = srtCol,
+                 keysize = .8, density.info = "none", key.par=list(mar = c(4,0.5,2,0.7)),
+                 lmat = matrix(data = c(0,0,0,4,1,1,3,1,1,2,2,2), ncol = 4),
+                 lwid = c(0.5, 1.2, 6.5, 0.01), lhei = c(2, 1.8, 5))
+  
+  if (length(barplot) != 0) {
+    for (i in 1:length(barplot)) {
+      df = as.data.frame(table(paste(celldata[!is.na(celldata[,cluster]), cluster],
+                                     celldata[,barplot[i]], sep = "x_x")))
+      df = cbind(str_split_fixed(df[,1], "x_x", n = 2), df[,2])
+      df = data.frame(as.numeric(df[,1]), df[,2], as.numeric(df[,3]))
+      colnames(df) = c("cluster", "ROI_ID", "Cell_count")
+      df$cluster = factor(df$cluster, levels = hm$colInd)
+      
+      p = ggplot(df, aes(fill=ROI_ID, y=Cell_count, x=cluster)) + 
+        geom_bar(position=type, stat="identity", orientation = "x") +
+        ggtitle(paste0("Cell count by ", barplot[i])) + theme_classic() +
+        theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+              axis.text.x = element_text(angle = 90, vjust = .5),
+              plot.margin = unit(c(0.02, 0, .03, 0), units = "npc"))
+      print(p)
+    }
+  }
+}
+
+```
+####filter celldata without ETP group and save new celldata dataframe
+```{r}
+celldata<-celldata[(celldata$ExpGroup %in% c("MRTX+PD1","MRTX+PD1+CTLA-4")),]
+unique(celldata$ExpGroup)
+date <- Sys.Date()
+output_file = paste0(output_path, "/",date, "_celldata.csv")
+output_file
+write.csv(celldata, file = output_file, row.names = F) 
+input_file = paste0(input_path, date, "_celldata.csv")
+input_file
+write.csv(celldata, file = input_file, row.names = F) 
+```
+
+# Heatmap
+# Generate a heatmap with markers versus clusters.
+
+```{r create heatmap with markers}
+# lineage markers only (16 nkp46-B220-Vimentin+CD8-):
+#B220 binding to nuclei ,so maybe manually choose cluster for B220
+lin_markers = c("CD45", "CD3e", "CD4", "Foxp3",'CD8a',"MHCII",
+                "CD11c","CD103", "F480", "CD68", "CD11b", "Ly6G", "PECAM",
+                "EpCAM", "aSMA","B220","PVR","CD44")
+# dexlude DNA ,domain, BCK, 
+excl_cols = c( "MI_Xenon131", "MI_Xenon132", "MI_DNA1",
+              "MI_DNA2", "MI_Argon80")
+
+all_markers = grep("MI_", names(celldata), value = T)
+all_markers = all_markers[!all_markers %in% excl_cols] %>%
+  str_remove(pattern = "MI_")
+
+plot.heatmap2(celldata, lin_markers, "kinv33", title = "Cluster k30 lineage markers",
+              Colv = T,  Rowv = T, srtCol = 90, barplot = c("ExpGroup", "ROI_ID"))
+plot.heatmap2(celldata, all_markers, "kinv33", title = "Cluster k30 all markers",
+              Colv = T,  Rowv = T, srtCol = 90, barplot = c("ExpGroup", "ROI_ID"))
+plot.heatmap2(celldata, all_markers, "kinv33", title = "ROI_allmarkers",margins = c(6,5),
+              Colv = T, Rowv = T,srtCol = 90,scale="row")
+plot.heatmap2(celldata, all_markers, "kinv33", title = "ROI_allmarkers",margins = c(6,5),
+              Colv = T, Rowv = T,srtCol = 90)
+plot.heatmap2(celldata, lin_markers, "kinv33", title = "Cluster k30",
+              Colv = T,Rowv = T, srtCol = 90)
+plot.heatmap2(celldata, all_markers, "kinv33", title = "Cluster k30",
+              Colv = T, srtCol = 90)
+plot.heatmap2(celldata, lin_markers, "ROI_ID", title = "ROI_linmarkers",margins = c(10,5),
+              Colv = T, srtCol = 90)
+plot.heatmap2(celldata, lin_markers, "ROI_ID", title = "ROI_linmarkers",margins = c(10,5),
+              Colv = T, srtCol = 90,scale="row")
+
+plot.bp = function(clustern) {
+  filename = file.path(file.path(output_path, "Figures/Cluster"),
+                       paste0(date, "_cluster", clustern, ".jpeg"))
+  jpeg(filename = filename, width = 700, height = 600, units = "px")
+  par(mar=c(11,4,1,1))
+  barplot(table(celldata[celldata$kinv33 == clustern, "filename"]),
+          las = 2, cex.names = 0.8)
+  dev.off()
+}
+
+date = str_sub(gsub("-", "", Sys.Date()), -6, -1)
+sapply(c(1:25), plot.bp)
+```
+
+##manual annotation
+```{r manual annotation}
+# Manually assign cluster labels (current: k30)
+##define the annotation function 
+annotate.cluster = function(clusterCol) {
+  for (cluster in unique(clusterCol)) {
+    newname = switch(cluster,
+                     "01" = "01_T cells CD8",
+                     "02" = "02_Endothelium", 
+                     "03A" = "03A_Macrophages type 1",
+                     "03B" = "03B_Macrophages other",
+                     "04" = "04_Macrophages type 2",
+                     "05" = "05_Fibroblasts",
+                     "06" = "06_Tumour",
+                     "07" = "07_Dendritic cells CD103",
+                     "08" = "08_Tumour",
+                     "09" = "09_Endothelium",
+                     "10" = "10_Tumour", 
+                     "11" = "11_Tumour",
+                     "12B" = "12B_T cells CD4",
+                     "12A" = "12A_T reg cells",
+                     "13" = "13_Tumour",
+                     "14" = "14_Neutrophils",
+                     "15A" = "15A_Endothelium", 
+                     "15B" = "15B_Epithelium", 
+                     "16" = "16_Endothelium",
+                     "17" = "17_Endothelium",
+                     "18A" = "18A_Macrophages other",
+                     "18B" = "18B_Tumour",
+                     "19" = "19_Tumour",
+                     "20" = "20_Endothelium",
+                     "21" = "21_Epithelium",
+                     "22" = "22_Epithelium",
+                     "23A" = "23A_Dendritic cells",
+                     "23B" = "23B_Macrophages type 2",
+                     "24" = "24_T cells CD4",
+                     "25" = "25_Tumour",
+                     "26" = "26_B cells",
+                     "00_Undefined"
+    )
+    clusterCol[clusterCol == cluster] = newname
+  }
+  return(clusterCol)
+}
+# Generate a column "anncluster" that makes a string out of the cluster numbers
+celldata$anncluster = str_pad(celldata$kinv33, 2, side="left", pad="0")
+## mannully split clusters
+celldata[celldata$anncluster == "15"
+         & celldata$MI_PECAM >= 0.04 , #& celldata, $MI_EpCAM  < 0.2,
+         "anncluster"] = "15A"
+celldata[celldata$anncluster == "15", "anncluster"] = "15B"
+
+celldata[celldata$anncluster == "18"
+         & celldata$MI_F480 > 0.5, #& celldata, $MI_EpCAM  < 0.2, 
+         "anncluster"] = "18A"
+celldata[celldata$anncluster == "18", "anncluster"] = "18B"
+
+celldata[celldata$anncluster == "12"
+         & celldata$MI_Foxp3>0.01, 
+         "anncluster"] = "12A"
+celldata[celldata$anncluster == "12", "anncluster"] = "12B"
+
+celldata[celldata$anncluster == "23"
+ & celldata$MI_CD11c>0.2, 
+    "anncluster"] = "23A"
+celldata[celldata$anncluster == "23", "anncluster"] = "23B"
+
+celldata[celldata$anncluster == "03"
+         & celldata$MI_CD206<0.4, 
+         "anncluster"] = "03A"
+celldata[celldata$anncluster == "03", "anncluster"] = "03B"
+# choose B cell cluster from all 
+celldata[celldata$MI_B220 > 0.7, "anncluster"] = "26"   
+##call function 
+celldata$anncluster = annotate.cluster(celldata$anncluster)
+#add annotation column 
+celldata$annotation = str_split(celldata$anncluster,
+                                pattern = "_", simplify = TRUE)[,2]
+```
+
+# recluster for myleoid annotation
+```{r}
+#   extract subgroup myeloidCD  from celldata
+#Myeloidclusters = c(23,03,07,04,18)
+Myeloidclusters = c(grep(pattern = "Macrophage", unique(celldata$anncluster), value = T),
+                grep(pattern = "Dendritic", unique(celldata$anncluster), value = T))
+myeloidCD <- celldata[celldata$anncluster %in% Myeloidclusters, ]
+
+if (file.exists("MyeloidCD.csv")) {
+  cat("The file already exists. Do you want to overwrite it? (yes/no): ")
+  overwrite <- tolower(readLines(con = stdin(), n = 1))
+  if (overwrite == "yes") {
+    write.csv(x = myeloidCD, file = file.path(output_path, "myeloidCD.csv"), row.names = T)
+    cat("The file has been overwritten as MyeloidCD.csv\n")
+  } else {
+    cat("File has not been overwritten.\n")
+  }
+} else {
+  write.csv(x = myeloidCD, file = file.path(output_path, "myeloidCD.csv"), row.names = T)
+  cat("The modified file has been saved as MyeloidCD.csv\n")
+}
+
+#write.csv(x = myeloidCD, file = file.path(output_path, "myeloidCD.csv"), row.names = T)
+#  recluster myeloids
+COI_names = c("MI_MHCII", "MI_F480", "MI_CD103", "MI_PDL1", "MI_CD86",
+                       "MI_CD68", "MI_CD206", "MI_pS6", "MI_CD11c", "MI_CD11b","MI_CD44")
+
+#test different kList = c(80,100,110,120,130,140,150,160,170,200,250,300,400,500)
+klist= c(200,250,300)
+create.clustering.object = function(myeloidCD, COInames, Klist) {
+  clustering = data.frame("index" = 1:nrow(myeloidCD))
+  for (k in Klist) {
+    print(Sys.time())
+    print(paste0("Current k: ", k))
+    # Run Rphenograph on data of select columns
+    Rphenograph_out <- Rphenograph(myeloidCD[COI_names], k=k)
+    # Create a dataframe with the annotation for each cell and sort by index
+    annotation = as.vector(membership(Rphenograph_out[[2]]))
+    index = as.numeric(names(membership(Rphenograph_out[[2]])))
+    clusterDF = data.frame(index, annotation)[order(index),]
+    
+    # Find the indexes of cells that were not clustered
+    allCellIndex = as.numeric(1:nrow(myeloidCD))
+    missing = allCellIndex[!allCellIndex %in% clusterDF$index]
+    
+    # Set the cluster for all unclustered cells to NA:
+    if (length(missing) > 0) {
+      unassignedCluster = NA
+      
+      for (n in missing) {
+        clusterDF = rbind(clusterDF[1:(n-1),],
+                          c(n, unassignedCluster),
+                          clusterDF[n:nrow(clusterDF),])
+      }
+    }
+    
+    # Add clustering to the celldata dataframe
+    if (isTRUE(all.equal(clustering$index, clusterDF$index))){
+      colnames = c(colnames(clustering), paste0("kinv", round(1/k * 1000)))
+      clustering = cbind(clustering, as.numeric(clusterDF$annotation))
+      colnames(clustering) = colnames
+    } else {
+      stop("Indexes do not correspond")
+    }
+  }
+  
+  clustering = subset(clustering, select = -c(index))
+  return(clustering)
+}
+
+clusteringObject = create.clustering.object(myeloidCD, COI_names, kList)
+
+# Save data with clustering information added
+date = str_sub(gsub("-", "", Sys.Date()), -6, -1)
+file_path = paste0(output_path, "/", date, "_clustering_k",
+                   paste(kList, collapse = "_k"),
+                   "_", length(COI_names), "markers.csv")
+write.csv(clusteringObject, file = file_path, row.names = F)
+print(Sys.time())
+
+# combine the myeloidCD withe new myeloid  cluster
+myeloid_clustCSV = read.csv(paste0(input_path,"/240527_clustering_k200_k250_k300_11markers.csv"))
+myeloidCD = cbind(myeloidCD, myeloid_clustCSV)
+# remove useless kinv: I have multiple kinv because I tried different k value . 
+myeloidCD <- myeloidCD[, !names(myeloidCD) %in% c("kinv2","kinv2.1","kinv7","kinv10","kinv12","kinv3","kinv4","kinv20","kinv25","kinv40","kinv50","kinv5.1","kinv5.2","kinv6","kinv8")]
+
+lin_myeloid_markers = c("MHCII", "F480", "CD103", "PDL1", "CD86",
+                       "CD68", "CD206", "pS6", "CD11c", "CD11b","CD44")
+
+plot.heatmap2(myeloidCD, lin_myeloid_markers, "kinv5", title = "Cluster k200",
+              Colv = T, srtCol = 90,scale = "row")
+
+### Next  use k200  for heatmap
+# Manually assign cluster labels (current: k200,kinv5)
+# Generate a column "anncluster" that makes a string out of the cluster numbers
+myeloidCD$anncluster = str_pad(myeloidCD$kinv5, 2, side="left", pad="0")
+print(unique(myeloidCD$anncluster))
+myeloidCD[myeloidCD$anncluster == "04"
+         & (myeloidCD$MI_MHCII > 0.9|myeloidCD$MI_CD11c>1) , #& celldata, $MI_EpCAM  < 0.2,
+         "anncluster"] = "04A"
+myeloidCD[myeloidCD$anncluster == "04"& (myeloidCD$MI_F480 > 0.5), "anncluster"] = "04B"
+myeloidCD[myeloidCD$anncluster == "04"& (myeloidCD$MI_F480 <= 0.5), "anncluster"] = "04C"
+print(unique(myeloidCD$anncluster))
+annotate.cluster = function(clusterCol) {
+  for (cluster in unique(clusterCol)) {
+    newname = switch(cluster,
+                     "01" = "01_Macrophages type 1",
+                     "02" = "02_Macrophages type 2",
+                     "03" = "03_Macrophages type 2",
+                     "04A" = "04A_Dendritic cells",
+                     "04B" = "04B_Macrophages type 2",
+                     "04C" = "04C_Macrophages type 1",
+                     "05" = "05_Macrophages type 2",
+                     "06" = "06_Macrophages type 1",
+                     "07" = "07_Dendritic cells CD103",
+                     "08" = "08_Macrophages type 2",
+                     "09" = "09_Macrophages type 2",
+                     "10" = "10_Macrophages type 1",
+                     "00_Undefined"
+    )
+    clusterCol[clusterCol == cluster] = newname
+  }
+  return(clusterCol)
+}
+# Apply cluster annotation
+myeloidCD$anncluster = annotate.cluster(myeloidCD$anncluster)
+print(unique(myeloidCD$anncluster))
+# Extract annotation from the updated cluster column
+myeloidCD$annotation = str_split(myeloidCD$anncluster,
+                             pattern = "_", simplify = TRUE)[,2]
+print(unique(myeloidCD$annotation))
+# annotated macrophages
+
+plot.heatmap2(myeloidCD, lin_myeloid_markers, "anncluster", title = "Annotated clusters",
+              margins = c(10, 5), srtCol = 60, Colv = T)
+plot.heatmap2(myeloidCD, lin_myeloid_markers, "annotation",
+              title = "Cell type expression pattern",
+              margins = c(10, 9), srtCol = 55)
+
+## make a new umap for new myeloidCD
+  MyeloidClusters = unique(myeloidCD$anncluster)
+  MyeloidColumns = c("MI_MHCII", "MI_F480", "MI_CD103", "MI_PDL1", "MI_CD86",
+                         "MI_CD68", "MI_CD206", "MI_pS6", "MI_CD11c", "MI_CD11b",'MI_Sirpa',"MI_CD44") #, "MI_LY6G",  "MI_CD44")
+  Umap_myeloidCD_newDC = generate.UMAP(datatable = myeloidCD, clusters = MyeloidClusters,
+                            markers = MyeloidColumns,
+                            filename = "Umap_myeloidCD_newDC.csv")
+ggplot(Umap_myeloidCD_newDC,aes(x=umap1, y=umap2, colour = anncluster))+geom_point()
+ggplot(Umap_myeloidCD_newDC,aes(x=umap1, y=umap2, colour = annotation))+geom_point()
+
+#Map maker on generted umap figures. 
+ggplot(Umap_myeloidCD,aes(x=umap1, y=umap2, colour = anncluster)) + 
+    geom_point() + 
+    geom_point(data = Umap_myeloidCD[which(Umap_myeloidCD$anncluster == "04_Dendritic cells"& Umap_myeloidCD$MI_MHCII>0.9),], colour = "black")
+
+##save new myeloidCD
+date <- Sys.Date()
+output_file = paste0(output_path, date, "_annotated_myeloidCD.csv")
+output_file
+write.csv(myeloidCD, file = output_file, row.names = F) 
+
+```
+#Xiaofei:Get new annotation because of the recluster of macrophages. 
+```{r}
+
+#ifelse(new_anncluster,anncluster),match -->index,anncluster[index]--> needed names of anncluster,cell_ID %in% Umap_myeloidCD$cell_ID-->which row is True
+print(unique(celldata$anncluster))
+celldata<-celldata %>% 
+  dplyr::mutate(anncluster=ifelse(cell_ID %in% myeloidCD$cell_ID,
+                      myeloidCD$anncluster[match(cell_ID,myeloidCD$cell_ID)],
+                      anncluster
+                      ))
+print(unique(celldata$anncluster))
+## To keep anncluster number unique 
+celldata[which(celldata$anncluster == "01_Macrophages type 1"), "anncluster"] = "31_Macrophages type 1"
+celldata[which(celldata$anncluster == "02_Macrophages type 2"), "anncluster"] = "32_Macrophages type 2"
+celldata[which(celldata$anncluster == "03_Macrophages type 2"), "anncluster"] = "33_Macrophages type 2"
+celldata[which(celldata$anncluster == "05_Macrophages type 2"), "anncluster"] = "35_Macrophages type 2"
+celldata[which(celldata$anncluster == "06_Macrophages type 1"), "anncluster"] = "36_Macrophages type 1"
+celldata[which(celldata$anncluster == "08_Macrophages type 2"), "anncluster"] = "38_Macrophages type 2"
+celldata[which(celldata$anncluster == "09_Macrophages type 2"), "anncluster"] = "39_Macrophages type 2"
+celldata[which(celldata$anncluster == "10_Macrophages type 1"), "anncluster"] = "40_Macrophages type 1"
+print(unique(celldata$anncluster))
+
+celldata$annotation = str_split(celldata$anncluster,
+                                pattern = "_", simplify = TRUE)[,2]
+## save the new generated celldata
+date <- "2024_06_26"
+output_file = paste0(output_path, date, "_celldata.csv")
+output_file
+input_file = paste0(input_path, date, "_celldata.csv")
+input_file
+write.csv(celldata, file = input_file, row.names = F) 
+## check all the  marker expression on Myeloid cells and the final check for cell annotation 
+
+plot.heatmap2(celldata, all_markers, "anncluster", title = "Annotated clusters",
+              margins = c(10, 5), srtCol = 60, Colv = T)
+plot.heatmap2(celldata, lin_markers, "anncluster", title = "Annotated clusters",
+              margins = c(10, 5), srtCol = 60, Colv = T)
+plot.heatmap2(celldata, lin_markers, "annotation",
+              title = "Cell type expression pattern",
+              margins = c(10, 9), srtCol = 55)
+
+ggplot(Umap_myeloidCD_newDC,aes(x=umap1, y=umap2, colour = anncluster))+geom_point()
+ggplot(Umap_myeloidCD_newDC,aes(x=umap1, y=umap2, colour = annotation))+geom_point()
+ggplot(Umap_myeloidCD_newDC,aes(x=umap1, y=umap2, colour = ExpGroup))+geom_point()
+
+
+MacDendCellColumns = c("MI_MHCII", "MI_F480", "MI_CD103", "MI_PDL1", "MI_CD86",
+                       "MI_CD68", "MI_CD206", "MI_pS6", "MI_CD11c", "MI_CD11b","MI_CD44")
+for (i in MacDendCellColumns){
+  marker = str_remove(i, "MI_")
+  p = ggplot(Umap_myeloidCD_newDC,
+             aes(x=umap1, y=umap2, colour = get(i))) + 
+    geom_point(size = 0.3) + ggtitle(paste0("Myeloid ", marker, " expression")) + 
+    theme_classic() + labs(x = "UMAP 1", y = "UMAP 2") +
+    theme(plot.background = element_blank(),
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 15),
+          legend.title = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 25, face = "bold"),
+          panel.grid = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank()) +
+    scale_color_distiller(palette = "Spectral", limits = c(0,3))
+  ggsave(filename = paste0("UMAP_Myeloid_", marker, "_expression.jpeg"),
+         path = file.path(output_path, "MyeloidUMAP"), bg = "white",
+         width = 2100, height = 1700, units = "px")
+  print(p)
+}
+
+
+```
+
+
